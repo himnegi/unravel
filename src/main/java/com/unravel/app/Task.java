@@ -1,72 +1,143 @@
 package com.unravel.app;
 
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.*;
 
 class Task implements Comparable<Task> {
-	private final String name;
-	private final int priority;
+	private static final long STARVATION_THRESHOLD_MS = 5000;
+	private static final int STARVATION_PRIORITY_BOOST = 1;
 
-	public Task(String name, int priority) {
-		this.name = name;
-		this.priority = priority;
+	private static final AtomicLong sequencer = new AtomicLong();
+	final long sequenceNumber;
+	final String type;
+	final int basePriority;
+	final long createdTime;
+
+	public Task(String type, int priority) {
+		this.type = type;
+		this.basePriority = priority;
+		this.createdTime = System.currentTimeMillis();
+		this.sequenceNumber = sequencer.getAndIncrement();
 	}
 
-	public String getName() {
-		return name;
+	private int effectivePriority() {
+		long age = System.currentTimeMillis() - createdTime;
+		int priority = basePriority;
+		if (age > STARVATION_THRESHOLD_MS) {
+			priority = Math.max(0, basePriority - STARVATION_PRIORITY_BOOST);
+		}
+		return priority;
 	}
 
 	@Override
 	public int compareTo(Task other) {
-		return Integer.compare(this.priority, other.priority);
+		int p1 = this.effectivePriority();
+		int p2 = other.effectivePriority();
+		if (p1 != p2) {
+			return Integer.compare(p1, p2);
+		}
+		return Long.compare(this.sequenceNumber, other.sequenceNumber);
+	}
+
+	@Override
+	public String toString() {
+		return String.format("[Type=%s, Priority=%d, Created=%d]", type, basePriority, createdTime);
 	}
 }
 
-class TaskProcessor {
-	private final BlockingQueue<Task> queue = new PriorityBlockingQueue<>();
+class TaskQueue {
+	private final PriorityBlockingQueue<Task> queue = new PriorityBlockingQueue<>();
 
-	public void produce(Task t) throws InterruptedException {
-		queue.put(t);
-		System.out.println("Produced: " + t.getName());
+	public void submit(Task task) {
+		queue.put(task);
+		System.out.println("Produced: " + task);
 	}
 
-	public Task consume() throws InterruptedException {
+	public Task take() throws InterruptedException {
 		return queue.take();
 	}
 }
 
-class Producer extends Thread {
-	private final TaskProcessor processor;
+class ProducerThread extends Thread {
+	private final TaskQueue taskQueue;
+	private final Random random = new Random();
+	private final String[] types = { "CRITICAL", "NORMAL", "LOW" };
 
-	public Producer(TaskProcessor processor) {
-		this.processor = processor;
+	public ProducerThread(TaskQueue queue) {
+		this.taskQueue = queue;
 	}
 
 	@Override
 	public void run() {
 		try {
-			processor.produce(new Task("Critical-1", 1));
-			processor.produce(new Task("Normal-1", 5));
-		} catch (InterruptedException ignored) {
+			for (int i = 0; i < 20; i++) {
+				int idx = random.nextInt(types.length);
+				String type = types[idx];
+				int priority;
+				switch (type) {
+				case "CRITICAL":
+					priority = 0;
+					break;
+				case "NORMAL":
+					priority = 1;
+					break;
+				default:
+					priority = 2;
+					break;
+				}
+				Task task = new Task(type, priority);
+				taskQueue.submit(task);
+				Thread.sleep(random.nextInt(200));
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
 		}
 	}
 }
 
-class Consumer extends Thread {
-	private final TaskProcessor processor;
+class ConsumerWorker implements Runnable {
+	private final TaskQueue taskQueue;
 
-	public Consumer(TaskProcessor processor) {
-		this.processor = processor;
+	public ConsumerWorker(TaskQueue queue) {
+		this.taskQueue = queue;
 	}
 
 	@Override
 	public void run() {
 		try {
 			while (true) {
-				Task t = processor.consume();
-				System.out.println("Consumed: " + t.getName());
+				Task task = taskQueue.take();
+				System.out.println(Thread.currentThread().getName() + " Consuming: " + task);
+				// simulate processing time
+				Thread.sleep(300);
 			}
-		} catch (InterruptedException ignored) {
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
 		}
+	}
+
+	public static void main(String[] args) {
+		TaskQueue taskQueue = new TaskQueue();
+
+		// Start multiple producers
+		for (int i = 0; i < 2; i++) {
+			new ProducerThread(taskQueue).start();
+		}
+
+		int consumerCount = 3;
+		ExecutorService consumers = Executors.newFixedThreadPool(consumerCount);
+		for (int i = 0; i < consumerCount; i++) {
+			consumers.submit(new ConsumerWorker(taskQueue));
+		}
+
+		try {
+			Thread.sleep(10000);
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		} finally {
+			consumers.shutdownNow();
+		}
+
 	}
 }
